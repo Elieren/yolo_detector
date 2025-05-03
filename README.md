@@ -1,6 +1,6 @@
 # yolo-rust
 
-## Установка перед запуском
+## Pre-launch installation
 ```
 sudo apt update -y
 ```
@@ -8,25 +8,25 @@ sudo apt update -y
 sudo apt install libopencv-dev pkg-config build-essential cmake libgtk-3-dev libcanberra-gtk3-module llvm-dev libclang-dev clang
 ```
 
-## Конвертация модели в onnx
-Эта библиотка использует модели типо .onnx
+## Converting the model to onnx
+This library uses tipo models.onnx
 
 ```
 pip install ultralytics
 ```
-Скачайте нужную вам модель.
+Download the model you need.
 ```
 https://huggingface.co/Ultralytics/YOLOv8/tree/main
 ```
 ```
 yolo export model=yolov8m.pt format=onnx opset=12
 ```
-Так же нужно скачать файл классов (coco.names)
+You also need to download the class file (coco.names)
 ```
 https://github.com/pjreddie/darknet/blob/master/data/coco.names
 ```
 
-## Пример кода
+## Sample code
 
 ```rust
 mod yolo_rust;
@@ -50,8 +50,8 @@ fn main() -> opencv::Result<()> {
 }
 ```
 
-## Автор
+## Author
 
-Разработано Elieren https://github.com/Elieren.
+Developed by Elieren https://github.com/Elieren .
 
-При использовании библиотеки — сохраняйте указание на автора.
+When using the library, keep an indication of the author.
