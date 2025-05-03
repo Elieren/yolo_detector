@@ -29,10 +29,8 @@ https://github.com/pjreddie/darknet/blob/master/data/coco.names
 ## Sample code
 
 ```rust
-mod yolo_rust;
-
 use opencv::{highgui, imgcodecs};
-use yolo_rust::YoloDetector;
+use yolo_detector::YoloDetector;
 
 fn main() -> opencv::Result<()> {
     let detector = YoloDetector::new("yolov8m.onnx", "coco.names").unwrap();
