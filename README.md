@@ -67,8 +67,32 @@ fn main() -> opencv::Result<()> {
 
     Ok(())
 }
-
 ```
+```rust
+use yolo_detector::YoloDetector;
+
+fn main() -> opencv::Result<()> {
+    let detector = YoloDetector::new("yolov8m.onnx", "coco.names", 640).unwrap();
+
+    let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let (detections, original_size) = detector.detect(&mat.clone())?;
+
+    let detections_with_classes =
+        detector.get_detections_with_classes(detections, 0.5, original_size);
+
+    for (class_name, rect) in detections_with_classes {
+        println!("Class: {}, Position: {:?}", class_name, rect);
+    }
+
+    Ok(())
+
+//returns values
+//Class: person, Position: Rect_ { x: 74, y: 875, width: 41, height: 112 }
+//Class: car, Position: Rect_ { x: 184, y: 899, width: 499, height: 141 }
+}
+```
+
 
 ## Author
 

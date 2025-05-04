@@ -170,6 +170,50 @@ impl YoloDetector {
 
         Ok(img)
     }
+
+    pub fn get_detections_with_classes(
+        &self,
+        detections: ndarray::Array2<f32>,
+        threshold: f32,
+        original_size: core::Size,
+    ) -> Vec<(String, core::Rect)> {
+        let mut result = Vec::new();
+
+        for pred in detections.outer_iter() {
+            let scale_x = original_size.width as f32 / (self.input_size as f32);
+            let scale_y = original_size.height as f32 / (self.input_size as f32);
+
+            let class_confidences: Vec<f32> = pred.iter().copied().skip(4).collect();
+            let (max_class_id, max_confidence) = class_confidences
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, &conf)| (i as usize, conf))
+                .unwrap_or((0, 0.0));
+
+            if max_confidence > threshold {
+                let x_center = pred[0] * scale_x;
+                let y_center = pred[1] * scale_y;
+                let width = pred[2] * scale_x;
+                let height = pred[3] * scale_y;
+
+                let x1 = (x_center - width / 2.0) as i32;
+                let y1 = (y_center - height / 2.0) as i32;
+                let rect = core::Rect::new(x1, y1, width as i32, height as i32);
+
+                let class_name = self
+                    .classes
+                    .get(max_class_id)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+
+                // Добавляем вектор с классом и его позицией (прямоугольник)
+                result.push((class_name.to_string(), rect));
+            }
+        }
+
+        result
+    }
 }
 
 impl YoloDetectorWeights {
