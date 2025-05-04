@@ -50,7 +50,7 @@ fn main() -> opencv::Result<()> {
 
 ```rust
 use opencv::{highgui, imgcodecs};
-use yolo_detector::YoloDetector;
+use yolo_detector::YoloDetectorWeights;
 
 fn main() -> opencv::Result<()> {
     let mut detector =
