@@ -19,7 +19,7 @@ Download the model you need.
 https://huggingface.co/Ultralytics/YOLOv8/tree/main
 ```
 ```
-yolo export model=yolov8m.pt format=onnx opset=12
+yolo export model=yolov8m.pt format=onnx opset=12 dynamic=True
 ```
 You also need to download the class file (coco.names)
 ```
@@ -33,7 +33,7 @@ use opencv::{highgui, imgcodecs};
 use yolo_detector::YoloDetector;
 
 fn main() -> opencv::Result<()> {
-    let detector = YoloDetector::new("yolov8m.onnx", "coco.names").unwrap();
+    let detector = YoloDetector::new("yolov8m.onnx", "coco.names", 640).unwrap();
 
     let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
 
@@ -46,6 +46,28 @@ fn main() -> opencv::Result<()> {
 
     Ok(())
 }
+```
+
+```rust
+use opencv::{highgui, imgcodecs};
+use yolo_detector::YoloDetector;
+
+fn main() -> opencv::Result<()> {
+    let mut detector =
+        YoloDetectorWeights::new("yolov4.weights", "yolov4.cfg", "coco.names").unwrap();
+
+    let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let (class_ids, confidences, boxes) = detector.detect(&mat.clone(), 0.7, 0.4)?;
+
+    let result = detector.draw_detections(&mut mat.clone(), class_ids, confidences, boxes)?;
+
+    highgui::imshow("YOLOv8 Video", &result)?;
+    highgui::wait_key(0)?;
+
+    Ok(())
+}
+
 ```
 
 ## Author
