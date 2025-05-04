@@ -1,4 +1,4 @@
-# yolo-rust
+# yolo_detector
 
 ## Pre-launch installation
 ```
