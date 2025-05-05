@@ -74,7 +74,7 @@ fn main() -> opencv::Result<()> {
 }
 ```
 
-### Weghts
+### Weights
 ```rust
 use opencv::{highgui, imgcodecs};
 use yolo_detector::YoloDetectorWeights;
@@ -167,7 +167,7 @@ fn main() -> opencv::Result<()> {
 ## Project roadmap
 
 - [x] Detection
-- [x] Weghts
+- [x] Weights
 - [x] OBB
 - [ ] Classification
 - [ ] Pose
