@@ -174,7 +174,7 @@ https://github.com/Elieren/yolo_detector/blob/main/ImageNet.names
 use yolo_detector::YoloDetector;
 
 fn main() -> opencv::Result<()> {
-    let detector = YoloDetector::new("yolov8m-cls.onnx", "ImageNet.names", 640).unwrap();
+    let detector = YoloDetector::new("yolov8m-cls.onnx", "ImageNet.names", 224).unwrap();
 
     let mat = imgcodecs::imread("zebra.jpg", imgcodecs::IMREAD_COLOR)?;
 
@@ -187,7 +187,7 @@ fn main() -> opencv::Result<()> {
     Ok(())
 
 //returns values
-// Class: zebra, Score: 0.5846555
+// Class: zebra, Score: 0.99995613
 }
 ```
 
