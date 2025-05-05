@@ -171,6 +171,103 @@ impl YoloDetector {
         Ok(img)
     }
 
+    pub fn draw_detections_obb(
+        &self,
+        mut img: Mat,
+        detections: ndarray::Array2<f32>,
+        threshold: f32,
+        original_size: core::Size,
+    ) -> opencv::Result<Mat> {
+        for pred in detections.outer_iter() {
+            let scale_x = original_size.width as f32 / self.input_size as f32;
+            let scale_y = original_size.height as f32 / self.input_size as f32;
+
+            let class_confidences: Vec<f32> = pred.iter().copied().skip(4).take(15).collect();
+            let (max_class_id, max_confidence) = class_confidences
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, &conf)| (i as usize, conf))
+                .unwrap_or((0, 0.0));
+
+            if max_confidence > threshold {
+                let x_center = pred[0] * scale_x;
+                let y_center = pred[1] * scale_y;
+                let width = pred[2] * scale_x;
+                let height = pred[3] * scale_y;
+                let angle_rad = pred[19];
+                let angle_deg = angle_rad.to_degrees();
+
+                let rect_center = Point2f::new(x_center, y_center);
+                let rect_size = Size2f::new(width, height);
+                let rotated_rect = core::RotatedRect::new(rect_center, rect_size, angle_deg)?;
+
+                // Получаем 4 точки прямоугольника
+                let mut points: [Point2f; 4] = Default::default();
+                rotated_rect.points(&mut points)?;
+
+                // Преобразуем в i32
+                let int_points: Vec<Point> = points
+                    .iter()
+                    .map(|p| Point::new(p.x.round() as i32, p.y.round() as i32))
+                    .collect();
+
+                // Создаём Mat для polylines
+                let mut contour_mat =
+                    unsafe { Mat::new_rows_cols(int_points.len() as i32, 1, core::CV_32SC2)? };
+                for (i, point) in int_points.iter().enumerate() {
+                    *contour_mat.at_2d_mut::<Point>(i as i32, 0)? = *point;
+                }
+
+                // Рисуем контур
+                imgproc::polylines(
+                    &mut img,
+                    &contour_mat,
+                    true,
+                    Scalar::new(255., 0., 0., 0.),
+                    2,
+                    imgproc::LINE_8,
+                    0,
+                )?;
+
+                // Цвет и подпись класса
+                let fallback_color = Scalar::new(255., 255., 255., 0.);
+                let color = self.colors.get(max_class_id).unwrap_or(&fallback_color);
+                let class_name = self
+                    .classes
+                    .get(max_class_id)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                let label = format!("{}: {:.2}", class_name, max_confidence);
+
+                // Находим верхнюю левую точку из 4 углов
+                let top_left = points
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.y as i32 * 10000 + a.x as i32).cmp(&(b.y as i32 * 10000 + b.x as i32))
+                    })
+                    .unwrap();
+
+                let label_position =
+                    Point::new(top_left.x.round() as i32, (top_left.y - 5.0) as i32);
+
+                imgproc::put_text(
+                    &mut img,
+                    &label,
+                    label_position,
+                    imgproc::FONT_HERSHEY_SIMPLEX,
+                    (0.5 * scale_y.min(scale_x)).into(),
+                    *color,
+                    1,
+                    imgproc::LINE_AA,
+                    false,
+                )?;
+            }
+        }
+
+        Ok(img)
+    }
+
     pub fn get_detections_with_classes(
         &self,
         detections: ndarray::Array2<f32>,
