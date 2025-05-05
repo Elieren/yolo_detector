@@ -1,10 +1,8 @@
-use ndarray::{s, Array2, Array4, ArrayD, ArrayView, Axis, CowArray, IxDyn};
+use ndarray::{Array2, Array4, ArrayD, CowArray, IxDyn};
 
 use opencv::{
     core,
-    core::{
-        add_weighted, Mat, Point, Point2f, Rect, Scalar, Size, Size2f, Vector, CV_8UC1, CV_8UC3,
-    },
+    core::{Mat, Point, Point2f, Rect, Scalar, Size, Size2f, Vector},
     dnn::{Backend, DetectionModel},
     imgproc,
     prelude::*,
