@@ -184,7 +184,6 @@ impl YoloDetector {
             let scale_y = original_size.height as f32 / self.input_size as f32;
 
             let total_len = pred.len();
-            println!("len: {}", total_len);
             let class_confidences: Vec<f32> =
                 pred.iter().copied().skip(4).take(total_len - 5).collect();
             let (max_class_id, max_confidence) = class_confidences
