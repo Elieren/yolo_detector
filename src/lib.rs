@@ -183,7 +183,10 @@ impl YoloDetector {
             let scale_x = original_size.width as f32 / self.input_size as f32;
             let scale_y = original_size.height as f32 / self.input_size as f32;
 
-            let class_confidences: Vec<f32> = pred.iter().copied().skip(4).take(15).collect();
+            let total_len = pred.len();
+            println!("len: {}", total_len);
+            let class_confidences: Vec<f32> =
+                pred.iter().copied().skip(4).take(total_len - 5).collect();
             let (max_class_id, max_confidence) = class_confidences
                 .iter()
                 .enumerate()
@@ -196,7 +199,7 @@ impl YoloDetector {
                 let y_center = pred[1] * scale_y;
                 let width = pred[2] * scale_x;
                 let height = pred[3] * scale_y;
-                let angle_rad = pred[19];
+                let angle_rad = pred[total_len - 1];
                 let angle_deg = angle_rad.to_degrees();
 
                 let rect_center = Point2f::new(x_center, y_center);
@@ -356,6 +359,49 @@ impl YoloDetector {
         }
 
         result
+    }
+
+    pub fn classify(&self, mat: &Mat, threshold: f32) -> Result<Vec<(String, f32)>, opencv::Error> {
+        let size = core::Size::new(self.input_size, self.input_size);
+        let mut resized = Mat::default();
+        imgproc::resize(&mat, &mut resized, size, 0.0, 0.0, imgproc::INTER_LINEAR)?;
+
+        // Извлекаем и нормализуем данные
+        let data = resized.data_bytes().unwrap();
+        let input: Vec<f32> = data
+            .chunks(3)
+            .flat_map(|bgr| [bgr[2] as f32, bgr[1] as f32, bgr[0] as f32])
+            .map(|v| v / 255.0)
+            .collect();
+
+        let input_size = self.input_size as usize;
+
+        let input_tensor = Array4::from_shape_fn((1, 3, input_size, input_size), |(_, c, y, x)| {
+            input[(y * input_size + x) * 3 + c]
+        });
+
+        let array_dyn: ArrayD<f32> = input_tensor.into_dyn();
+        let cow_input = CowArray::from(array_dyn);
+        let input_value = Value::from_array(self.session.allocator(), &cow_input).unwrap();
+
+        let outputs = self.session.run(vec![input_value]).unwrap();
+
+        let output_tensor: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
+            outputs[0].try_extract().unwrap();
+
+        let output_view = output_tensor.view();
+        let output_array = output_view.clone().index_axis_move(ndarray::Axis(0), 0);
+
+        // Собираем все классы с score > threshold
+        let mut results = Vec::new();
+        for (i, &score) in output_array.iter().enumerate() {
+            if score > threshold {
+                let class_name = &self.classes[i];
+                results.push((class_name.clone(), score));
+            }
+        }
+
+        Ok(results)
     }
 }
 

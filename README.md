@@ -164,12 +164,39 @@ fn main() -> opencv::Result<()> {
 }
 ```
 
+### Classification
+ImageNet.names
+```
+https://github.com/Elieren/yolo_detector/blob/main/ImageNet.names
+```
+
+```rust
+use yolo_detector::YoloDetector;
+
+fn main() -> opencv::Result<()> {
+    let detector = YoloDetector::new("yolov8m-cls.onnx", "ImageNet.names", 640).unwrap();
+
+    let mat = imgcodecs::imread("zebra.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let result = detector.classify(&mat.clone(), 0.5)?;
+
+    for (class_name, score) in result {
+        println!("Class: {}, Score: {}", class_name, score);
+    }
+    
+    Ok(())
+
+//returns values
+// Class: zebra, Score: 0.5846555
+}
+```
+
 ## Project roadmap
 
 - [x] Detection
 - [x] Weights
 - [x] OBB
-- [ ] Classification
+- [x] Classification
 - [ ] Pose
 - [ ] Segmentation
 
