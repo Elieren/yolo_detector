@@ -51,6 +51,7 @@ fn main() -> opencv::Result<()> {
 ```
 ```rust
 use yolo_detector::YoloDetector;
+use opencv::imgcodecs;
 
 fn main() -> opencv::Result<()> {
     let detector = YoloDetector::new("yolov8m.onnx", "coco.names", 640).unwrap();
@@ -138,6 +139,7 @@ fn main() -> opencv::Result<()> {
 
 ```rust
 use yolo_detector::YoloDetector;
+use opencv::imgcodecs;
 
 fn main() -> opencv::Result<()> {
     let detector = YoloDetector::new("yolov8m-obb.onnx", "DOTAv1.names", 640).unwrap();
@@ -172,6 +174,7 @@ https://github.com/Elieren/yolo_detector/blob/main/ImageNet.names
 
 ```rust
 use yolo_detector::YoloDetector;
+use opencv::imgcodecs;
 
 fn main() -> opencv::Result<()> {
     let detector = YoloDetector::new("yolov8m-cls.onnx", "ImageNet.names", 224).unwrap();
@@ -191,6 +194,56 @@ fn main() -> opencv::Result<()> {
 }
 ```
 
+### Segmentation
+```rust
+use opencv::{highgui, imgcodecs};
+use yolo_detector::YoloDetector;
+
+fn main() -> opencv::Result<()> {
+    let detector = YoloDetector::new("yolov8m-seg.onnx", "coco.names", 640).unwrap();
+
+    let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let (detections, mask, original_size) = detector.detect_mask(&mat.clone())?;
+
+    let result = detector.draw_detections_masked(mat.clone(), detections, mask, original_size, 0.5)?;
+
+    highgui::imshow("YOLOv8 Video", &result)?;
+    highgui::wait_key(0)?;
+
+    Ok(())
+}
+```
+
+```rust
+use yolo_detector::YoloDetector;
+use opencv::imgcodecs;
+
+fn main() -> opencv::Result<()> {
+    let detector = YoloDetector::new("yolov8m-seg.onnx", "coco.names", 640).unwrap();
+
+    let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let (detections, mask, original_size) = detector.detect_mask(&mat.clone())?;
+
+    let detections =
+        detector.get_detections_with_classes_masks(mat.clone(), detections, mask, original_size, 0.5)?;
+
+    // Обработка результатов
+    for (class_name, rect, conf, mask) in detections {
+        println!(
+            "Class: {}, Confidence: {}, BoundingBox: {:?}, Mask: {:?}",
+            class_name, conf, rect, mask
+        );
+    }
+
+    Ok(())
+//returns values
+// Class: car, Confidence: 0.92939186, BoundingBox: Rect_ { x: 185, y: 900, width: 500, height: 142 }, Mask: Mat { type: "CV_8UC1", flags: "0x42FF4000 (continuous)", channels: 1, depth: "CV_8U", dims: 2, size: Size_ { width: 1680, height: 1116 }, rows: 1116, cols: 1680, elem_size: 1, elem_size1: 1, total: 1874880, is_continuous: true, is_submatrix: false, data: <element count is higher than threshold: 1000> }
+// Class: person, Confidence: 0.7530618, BoundingBox: Rect_ { x: 1091, y: 860, width: 78, height: 133 }, Mask: Mat { type: "CV_8UC1", flags: "0x42FF4000 (continuous)", channels: 1, depth: "CV_8U", dims: 2, size: Size_ { width: 1680, height: 1116 }, rows: 1116, cols: 1680, elem_size: 1, elem_size1: 1, total: 1874880, is_continuous: true, is_submatrix: false, data: <element count is higher than threshold: 1000> }
+}
+```
+
 ## Project roadmap
 
 - [x] Detection
@@ -198,7 +251,7 @@ fn main() -> opencv::Result<()> {
 - [x] OBB
 - [x] Classification
 - [ ] Pose
-- [ ] Segmentation
+- [x] Segmentation
 
 ## Author
 

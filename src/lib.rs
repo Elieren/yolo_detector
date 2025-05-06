@@ -1,8 +1,11 @@
-use ndarray::{Array2, Array4, ArrayD, CowArray, IxDyn};
+use ndarray::{s, Array2, Array4, ArrayD, ArrayView, ArrayView1, Axis, CowArray, IxDyn};
 
 use opencv::{
     core,
-    core::{Mat, Point, Point2f, Rect, Scalar, Size, Size2f, Vector},
+    core::{
+        add_weighted, no_array, Mat, Point, Point2f, Rect, Scalar, Size, Size2f, Vector, CV_8UC1,
+        CV_8UC3,
+    },
     dnn::{Backend, DetectionModel},
     imgproc,
     prelude::*,
@@ -69,6 +72,39 @@ impl YoloDetector {
         Scalar::new(b, g, r, 0.0)
     }
 
+    fn make_mask_mat(
+        mask_weights: ArrayView1<f32>, // длина 32
+        mask_protos: &Array2<f32>,     // [32, ph*pw]
+        ph: usize,
+        original_size: core::Size,
+        threshold: f32, // порог для бинаризации
+    ) -> opencv::Result<Mat> {
+        // 1) линейная комбинация mask_weights·mask_protos → Vec<f32> длины ph*pw
+        let mask_lin = mask_weights.dot(mask_protos);
+
+        // 2) бинаризация по порогу, переданному как параметр → Vec<u8>
+        let mask_bin: Vec<u8> = mask_lin
+            .iter()
+            .map(|&v| if v > threshold { 255 } else { 0 })
+            .collect();
+
+        // 3) обернуть в Mat (1‑канал)
+        let base_mat = Mat::from_slice(&mask_bin)?; // базовый одноканальный
+        let mask_mat = base_mat.reshape(1, ph as i32)?; // CV_8U, size ph×pw
+
+        // 4) растянуть до original_size
+        let mut mask_resized = Mat::default();
+        imgproc::resize(
+            &mask_mat,
+            &mut mask_resized,
+            original_size,
+            0.0,
+            0.0,
+            imgproc::INTER_NEAREST,
+        )?;
+        Ok(mask_resized)
+    }
+
     pub fn detect(&self, mat: &Mat) -> Result<(Array2<f32>, core::Size), opencv::Error> {
         let original_size = mat.size()?;
         let size = core::Size::new(self.input_size, self.input_size);
@@ -114,6 +150,67 @@ impl YoloDetector {
             .map_err(|e| opencv::Error::new(0, format!("Shape error: {}", e)))?;
 
         Ok((transposed, original_size))
+    }
+
+    pub fn detect_mask(
+        &self,
+        mat: &Mat,
+    ) -> Result<(Array2<f32>, Array2<f32>, core::Size), opencv::Error> {
+        let original_size = mat.size()?;
+        let size = core::Size::new(self.input_size, self.input_size);
+        let mut resized = Mat::default();
+        imgproc::resize(&mat, &mut resized, size, 0.0, 0.0, imgproc::INTER_LINEAR)?;
+
+        // Извлекаем и нормализуем данные
+        let data = resized.data_bytes().unwrap();
+        let input: Vec<f32> = data
+            .chunks(3)
+            .flat_map(|bgr| [bgr[2] as f32, bgr[1] as f32, bgr[0] as f32])
+            .map(|v| v / 255.0)
+            .collect();
+
+        // Создаем Array4 [1, 3, N, N]
+        let input_size = self.input_size as usize;
+
+        let input_tensor = Array4::from_shape_fn((1, 3, input_size, input_size), |(_, c, y, x)| {
+            input[(y * input_size + x) * 3 + c]
+        });
+
+        // Преобразуем в динамический тензор и оборачиваем
+        let array_dyn: ArrayD<f32> = input_tensor.into_dyn();
+        let cow_input = CowArray::from(array_dyn);
+        let input_value = Value::from_array(self.session.allocator(), &cow_input).unwrap();
+
+        // Инференс
+        let outputs = self.session.run(vec![input_value]).unwrap();
+
+        // Получаем OrtOwnedTensor<f32, IxDyn>
+        let output_tensor1: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
+            outputs[0].try_extract().unwrap();
+
+        let output_tensor2: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
+            outputs[1].try_extract().unwrap();
+
+        let temp_output0 = output_tensor1.view(); // [116,8400]
+        let output0 = temp_output0.clone().index_axis_move(ndarray::Axis(0), 0);
+        let dets = output0.t().to_owned(); // [8400,116]
+        let temp_protos = output_tensor2.view(); // [32,160,160]
+        let protos = temp_protos
+            .clone()
+            .index_axis(ndarray::Axis(0), 0)
+            .to_owned();
+        let (num_proto, ph, pw) = (protos.shape()[0], protos.shape()[1], protos.shape()[2]);
+        let proto_flat = protos.into_shape((num_proto, ph * pw)).unwrap();
+
+        let detections: Array2<f32> = dets
+            .into_dimensionality()
+            .map_err(|e| opencv::Error::new(0, format!("Shape error: {}", e)))?;
+
+        let mask: Array2<f32> = proto_flat
+            .into_dimensionality()
+            .map_err(|e| opencv::Error::new(0, format!("Shape error: {}", e)))?;
+
+        Ok((detections, mask, original_size))
     }
 
     pub fn draw_detections(
@@ -271,6 +368,90 @@ impl YoloDetector {
         Ok(img)
     }
 
+    pub fn draw_detections_masked(
+        &self,
+        img: Mat,
+        detections: Array2<f32>,
+        mask_protos: Array2<f32>,
+        original_size: core::Size,
+        threshold: f32,
+    ) -> opencv::Result<Mat> {
+        // подготовка output и overlay
+        let mut output = img.clone();
+        let mut overlay = output.clone();
+
+        let ph = (mask_protos.shape()[1] as f32).sqrt() as usize;
+
+        // единый проход по предсказаниям: сначала бокс, затем маска внутри бокса
+        for pred in detections.outer_iter() {
+            // выбрать класс и confidence
+            let class_scores = pred.slice(s![4..84]);
+            let (class_id, &conf) = class_scores
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap();
+            if conf < threshold {
+                continue;
+            }
+
+            // вычисление bbox в координатах оригинала
+            let sx = original_size.width as f32 / self.input_size as f32;
+            let sy = original_size.height as f32 / self.input_size as f32;
+            let bx = pred[0] * sx;
+            let by = pred[1] * sy;
+            let bw = pred[2] * sx;
+            let bh = pred[3] * sy;
+            let x1 = (bx - bw / 2.0).round() as i32;
+            let y1 = (by - bh / 2.0).round() as i32;
+            let x2 = (bx + bw / 2.0).round() as i32;
+            let y2 = (by + bh / 2.0).round() as i32;
+
+            let rect = core::Rect::new(
+                x1.clamp(0, original_size.width - 1),
+                y1.clamp(0, original_size.height - 1),
+                (x2 - x1).clamp(1, original_size.width - x1),
+                (y2 - y1).clamp(1, original_size.height - y1),
+            );
+
+            let fallback_color = Scalar::new(255., 255., 255., 0.);
+            let color = *self.colors.get(class_id).unwrap_or(&fallback_color);
+
+            // рисуем бокс на output
+            imgproc::rectangle(&mut output, rect, color, 2, imgproc::LINE_8, 0)?;
+
+            // формируем бинарную маску из прототипов
+            let mask_weights = pred.slice(s![84..116]);
+            let mask_mat =
+                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)?;
+
+            // создаём маску bbox, чтобы ограничить область наложения
+            let mut bbox_mask =
+                Mat::zeros(original_size.height, original_size.width, core::CV_8UC1)?.to_mat()?;
+            imgproc::rectangle(
+                &mut bbox_mask,
+                rect,
+                Scalar::new(255., 255., 255., 0.),
+                -1,
+                imgproc::LINE_8,
+                0,
+            )?;
+
+            // пересечение маски объекта и bbox
+            let mut mask_clipped = Mat::default();
+            core::bitwise_and(&mask_mat, &bbox_mask, &mut mask_clipped, &Mat::default())?;
+
+            // накладываем цвет внутри пересечённой маски на overlay
+            overlay.set_to(&color, &mask_clipped)?;
+        }
+
+        // смешиваем overlay (маски внутри боксов) и output (оригинал + боксы)
+        let mut blended = Mat::default();
+        core::add_weighted(&overlay, 0.5, &output, 0.5, 0.0, &mut blended, -1)?;
+
+        Ok(blended)
+    }
+
     pub fn get_detections_with_classes(
         &self,
         detections: ndarray::Array2<f32>,
@@ -358,6 +539,69 @@ impl YoloDetector {
         }
 
         result
+    }
+
+    pub fn get_detections_with_classes_masks(
+        &self,
+        img: Mat,
+        detections: Array2<f32>,
+        mask_protos: Array2<f32>,
+        original_size: core::Size,
+        threshold: f32,
+    ) -> opencv::Result<Vec<(String, core::Rect, f32, Mat)>> {
+        let mut results = Vec::new();
+        let ph = (mask_protos.shape()[1] as f32).sqrt() as usize;
+
+        // Проходим по предсказаниям
+        for pred in detections.outer_iter() {
+            // Извлекаем класс и confidence
+            let class_scores = pred.slice(s![4..84]);
+            let (class_id, &conf) = class_scores
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap();
+
+            if conf < threshold {
+                continue;
+            }
+
+            // Преобразуем bbox в оригинальные координаты
+            let scale_x = original_size.width as f32 / self.input_size as f32;
+            let scale_y = original_size.height as f32 / self.input_size as f32;
+            let bx = pred[0] * scale_x;
+            let by = pred[1] * scale_y;
+            let bw = pred[2] * scale_x;
+            let bh = pred[3] * scale_y;
+            let x1 = (bx - bw / 2.0).round() as i32;
+            let y1 = (by - bh / 2.0).round() as i32;
+            let x2 = (bx + bw / 2.0).round() as i32;
+            let y2 = (by + bh / 2.0).round() as i32;
+
+            let rect = core::Rect::new(
+                x1.clamp(0, original_size.width - 1),
+                y1.clamp(0, original_size.height - 1),
+                (x2 - x1).clamp(1, original_size.width - x1),
+                (y2 - y1).clamp(1, original_size.height - y1),
+            );
+
+            // Получаем имя класса
+            let class_name = self
+                .classes
+                .get(class_id)
+                .map(String::as_str)
+                .unwrap_or("unknown");
+
+            // Генерация бинарной маски
+            let mask_weights = pred.slice(s![84..116]);
+            let mask_mat =
+                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)?;
+
+            // Добавляем данные в результат
+            results.push((class_name.to_string(), rect, conf, mask_mat));
+        }
+
+        Ok(results)
     }
 
     pub fn classify(&self, mat: &Mat, threshold: f32) -> Result<Vec<(String, f32)>, opencv::Error> {
