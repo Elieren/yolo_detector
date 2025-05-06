@@ -7,6 +7,7 @@ use opencv::{
     imgproc,
     prelude::*,
 };
+use ordered_float::OrderedFloat;
 use ort::{Environment, Session, SessionBuilder, Value};
 use rand::distr::{Distribution, Uniform};
 use rand::rng;
@@ -100,6 +101,54 @@ impl YoloDetector {
             imgproc::INTER_NEAREST,
         )?;
         Ok(mask_resized)
+    }
+
+    fn non_max_suppression(
+        boxes: &[(f32, f32, f32, f32)], // x_center, y_center, width, height
+        scores: &[f32],
+        nms_threshold: f32,
+    ) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..scores.len()).collect();
+        indices.sort_by_key(|&i| OrderedFloat(scores[i])); // сортируем по score
+        indices.reverse();
+
+        let mut keep = Vec::new();
+
+        while let Some(i) = indices.pop() {
+            keep.push(i);
+            indices.retain(|&j| {
+                let (xi, yi, wi, hi) = boxes[i];
+                let (xj, yj, wj, hj) = boxes[j];
+
+                let area_i = wi * hi;
+                let area_j = wj * hj;
+
+                let xi1 = xi - wi / 2.0;
+                let yi1 = yi - hi / 2.0;
+                let xi2 = xi + wi / 2.0;
+                let yi2 = yi + hi / 2.0;
+
+                let xj1 = xj - wj / 2.0;
+                let yj1 = yj - hj / 2.0;
+                let xj2 = xj + wj / 2.0;
+                let yj2 = yj + hj / 2.0;
+
+                let xx1 = xi1.max(xj1);
+                let yy1 = yi1.max(yj1);
+                let xx2 = xi2.min(xj2);
+                let yy2 = yi2.min(yj2);
+
+                let w = (xx2 - xx1).max(0.0);
+                let h = (yy2 - yy1).max(0.0);
+                let inter = w * h;
+                let union = area_i + area_j - inter;
+                let iou = inter / union;
+
+                iou <= nms_threshold
+            });
+        }
+
+        keep
     }
 
     pub fn detect(&self, mat: &Mat) -> Result<(Array2<f32>, core::Size), opencv::Error> {
@@ -215,12 +264,17 @@ impl YoloDetector {
         mut img: Mat,
         detections: ndarray::Array2<f32>,
         threshold: f32,
+        nms_threshold: f32,
         original_size: core::Size,
     ) -> opencv::Result<Mat> {
-        for pred in detections.outer_iter() {
-            let scale_x = original_size.width as f32 / (self.input_size as f32);
-            let scale_y = original_size.height as f32 / (self.input_size as f32);
+        let scale_x = original_size.width as f32 / (self.input_size as f32);
+        let scale_y = original_size.height as f32 / (self.input_size as f32);
 
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut class_ids = Vec::new();
+
+        for pred in detections.outer_iter() {
             let class_confidences: Vec<f32> = pred.iter().copied().skip(4).collect();
             let (max_class_id, max_confidence) = class_confidences
                 .iter()
@@ -235,32 +289,44 @@ impl YoloDetector {
                 let width = pred[2] * scale_x;
                 let height = pred[3] * scale_y;
 
-                let x1 = (x_center - width / 2.0) as i32;
-                let y1 = (y_center - height / 2.0) as i32;
-                let rect = core::Rect::new(x1, y1, width as i32, height as i32);
-
-                let fallback_color = Scalar::new(255., 255., 255., 0.);
-                let color = self.colors.get(max_class_id).unwrap_or(&fallback_color);
-                imgproc::rectangle(&mut img, rect, *color, 2, imgproc::LINE_8, 0)?;
-
-                let class_name = self
-                    .classes
-                    .get(max_class_id)
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
-                let label = format!("{}: {:.2}", class_name, max_confidence);
-                imgproc::put_text(
-                    &mut img,
-                    &label,
-                    core::Point::new(x1, y1 - 10),
-                    imgproc::FONT_HERSHEY_SIMPLEX,
-                    (0.5 * scale_y.min(scale_x)).into(), // масштабируем текст
-                    *color,
-                    1,
-                    imgproc::LINE_AA,
-                    false,
-                )?;
+                boxes.push((x_center, y_center, width, height));
+                scores.push(max_confidence);
+                class_ids.push(max_class_id);
             }
+        }
+
+        let keep_indices = Self::non_max_suppression(&boxes, &scores, nms_threshold); // nms_threshold
+
+        for &i in &keep_indices {
+            let (x_center, y_center, width, height) = boxes[i];
+            let class_id = class_ids[i];
+            let confidence = scores[i];
+
+            let x1 = (x_center - width / 2.0) as i32;
+            let y1 = (y_center - height / 2.0) as i32;
+            let rect = core::Rect::new(x1, y1, width as i32, height as i32);
+
+            let fallback_color = Scalar::new(255., 255., 255., 0.);
+            let color = self.colors.get(class_id).unwrap_or(&fallback_color);
+            imgproc::rectangle(&mut img, rect, *color, 2, imgproc::LINE_8, 0)?;
+
+            let class_name = self
+                .classes
+                .get(class_id)
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            let label = format!("{}: {:.2}", class_name, confidence);
+            imgproc::put_text(
+                &mut img,
+                &label,
+                core::Point::new(x1, y1 - 10),
+                imgproc::FONT_HERSHEY_SIMPLEX,
+                (0.5 * scale_y.min(scale_x)).into(),
+                *color,
+                1,
+                imgproc::LINE_AA,
+                false,
+            )?;
         }
 
         Ok(img)
@@ -271,15 +337,22 @@ impl YoloDetector {
         mut img: Mat,
         detections: ndarray::Array2<f32>,
         threshold: f32,
+        nms_threshold: f32,
         original_size: core::Size,
     ) -> opencv::Result<Mat> {
-        for pred in detections.outer_iter() {
-            let scale_x = original_size.width as f32 / self.input_size as f32;
-            let scale_y = original_size.height as f32 / self.input_size as f32;
+        let scale_x = original_size.width as f32 / self.input_size as f32;
+        let scale_y = original_size.height as f32 / self.input_size as f32;
 
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut class_ids = Vec::new();
+        let mut angles = Vec::new();
+
+        for pred in detections.outer_iter() {
             let total_len = pred.len();
             let class_confidences: Vec<f32> =
                 pred.iter().copied().skip(4).take(total_len - 5).collect();
+
             let (max_class_id, max_confidence) = class_confidences
                 .iter()
                 .enumerate()
@@ -293,73 +366,79 @@ impl YoloDetector {
                 let width = pred[2] * scale_x;
                 let height = pred[3] * scale_y;
                 let angle_rad = pred[total_len - 1];
-                let angle_deg = angle_rad.to_degrees();
 
-                let rect_center = Point2f::new(x_center, y_center);
-                let rect_size = Size2f::new(width, height);
-                let rotated_rect = core::RotatedRect::new(rect_center, rect_size, angle_deg)?;
-
-                // Получаем 4 точки прямоугольника
-                let mut points: [Point2f; 4] = Default::default();
-                rotated_rect.points(&mut points)?;
-
-                // Преобразуем в i32
-                let int_points: Vec<Point> = points
-                    .iter()
-                    .map(|p| Point::new(p.x.round() as i32, p.y.round() as i32))
-                    .collect();
-
-                // Создаём Mat для polylines
-                let mut contour_mat =
-                    unsafe { Mat::new_rows_cols(int_points.len() as i32, 1, core::CV_32SC2)? };
-                for (i, point) in int_points.iter().enumerate() {
-                    *contour_mat.at_2d_mut::<Point>(i as i32, 0)? = *point;
-                }
-
-                // Рисуем контур
-                imgproc::polylines(
-                    &mut img,
-                    &contour_mat,
-                    true,
-                    Scalar::new(255., 0., 0., 0.),
-                    2,
-                    imgproc::LINE_8,
-                    0,
-                )?;
-
-                // Цвет и подпись класса
-                let fallback_color = Scalar::new(255., 255., 255., 0.);
-                let color = self.colors.get(max_class_id).unwrap_or(&fallback_color);
-                let class_name = self
-                    .classes
-                    .get(max_class_id)
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
-                let label = format!("{}: {:.2}", class_name, max_confidence);
-
-                // Находим верхнюю левую точку из 4 углов
-                let top_left = points
-                    .iter()
-                    .min_by(|a, b| {
-                        (a.y as i32 * 10000 + a.x as i32).cmp(&(b.y as i32 * 10000 + b.x as i32))
-                    })
-                    .unwrap();
-
-                let label_position =
-                    Point::new(top_left.x.round() as i32, (top_left.y - 5.0) as i32);
-
-                imgproc::put_text(
-                    &mut img,
-                    &label,
-                    label_position,
-                    imgproc::FONT_HERSHEY_SIMPLEX,
-                    (0.5 * scale_y.min(scale_x)).into(),
-                    *color,
-                    1,
-                    imgproc::LINE_AA,
-                    false,
-                )?;
+                boxes.push((x_center, y_center, width, height));
+                scores.push(max_confidence);
+                class_ids.push(max_class_id);
+                angles.push(angle_rad);
             }
+        }
+
+        let keep_indices = Self::non_max_suppression(&boxes, &scores, nms_threshold); // nms_threshold
+
+        for &i in &keep_indices {
+            let (x_center, y_center, width, height) = boxes[i];
+            let class_id = class_ids[i];
+            let confidence = scores[i];
+            let angle_rad = angles[i];
+            let angle_deg = angle_rad.to_degrees();
+
+            let rect_center = Point2f::new(x_center, y_center);
+            let rect_size = Size2f::new(width, height);
+            let rotated_rect = core::RotatedRect::new(rect_center, rect_size, angle_deg)?;
+
+            let mut points: [Point2f; 4] = Default::default();
+            rotated_rect.points(&mut points)?;
+
+            let int_points: Vec<Point> = points
+                .iter()
+                .map(|p| Point::new(p.x.round() as i32, p.y.round() as i32))
+                .collect();
+
+            let mut contour_mat =
+                unsafe { Mat::new_rows_cols(int_points.len() as i32, 1, core::CV_32SC2)? };
+            for (j, point) in int_points.iter().enumerate() {
+                *contour_mat.at_2d_mut::<Point>(j as i32, 0)? = *point;
+            }
+
+            imgproc::polylines(
+                &mut img,
+                &contour_mat,
+                true,
+                Scalar::new(255., 0., 0., 0.),
+                2,
+                imgproc::LINE_8,
+                0,
+            )?;
+
+            let fallback_color = Scalar::new(255., 255., 255., 0.);
+            let color = self.colors.get(class_id).unwrap_or(&fallback_color);
+            let class_name = self
+                .classes
+                .get(class_id)
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            let label = format!("{}: {:.2}", class_name, confidence);
+
+            let top_left = points
+                .iter()
+                .min_by(|a, b| {
+                    (a.y as i32 * 10000 + a.x as i32).cmp(&(b.y as i32 * 10000 + b.x as i32))
+                })
+                .unwrap();
+
+            let label_position = Point::new(top_left.x.round() as i32, (top_left.y - 5.0) as i32);
+            imgproc::put_text(
+                &mut img,
+                &label,
+                label_position,
+                imgproc::FONT_HERSHEY_SIMPLEX,
+                (0.5 * scale_y.min(scale_x)).into(),
+                *color,
+                1,
+                imgproc::LINE_AA,
+                false,
+            )?;
         }
 
         Ok(img)
@@ -370,35 +449,57 @@ impl YoloDetector {
         img: Mat,
         detections: Array2<f32>,
         mask_protos: Array2<f32>,
-        original_size: core::Size,
         threshold: f32,
+        nms_threshold: f32,
+        original_size: core::Size,
     ) -> opencv::Result<Mat> {
-        // подготовка output и overlay
         let mut output = img.clone();
         let mut overlay = output.clone();
 
         let ph = (mask_protos.shape()[1] as f32).sqrt() as usize;
 
-        // единый проход по предсказаниям: сначала бокс, затем маска внутри бокса
+        let sx = original_size.width as f32 / self.input_size as f32;
+        let sy = original_size.height as f32 / self.input_size as f32;
+
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut class_ids = Vec::new();
+        let mut mask_weights_list = Vec::new();
+
         for pred in detections.outer_iter() {
-            // выбрать класс и confidence
             let class_scores = pred.slice(s![4..84]);
             let (class_id, &conf) = class_scores
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
                 .unwrap();
+
             if conf < threshold {
                 continue;
             }
 
-            // вычисление bbox в координатах оригинала
-            let sx = original_size.width as f32 / self.input_size as f32;
-            let sy = original_size.height as f32 / self.input_size as f32;
             let bx = pred[0] * sx;
             let by = pred[1] * sy;
             let bw = pred[2] * sx;
             let bh = pred[3] * sy;
+            let x1 = bx - bw / 2.0;
+            let y1 = by - bh / 2.0;
+
+            boxes.push((x1, y1, bw, bh));
+            scores.push(conf);
+            class_ids.push(class_id);
+            mask_weights_list.push(pred.slice(s![84..116]).to_owned());
+        }
+
+        let keep_indices = Self::non_max_suppression(&boxes, &scores, nms_threshold);
+
+        for &i in &keep_indices {
+            let (x1, y1, bw, bh) = boxes[i];
+            let class_id = class_ids[i];
+            let mask_weights = &mask_weights_list[i];
+
+            let bx = x1 + bw / 2.0;
+            let by = y1 + bh / 2.0;
             let x1 = (bx - bw / 2.0).round() as i32;
             let y1 = (by - bh / 2.0).round() as i32;
             let x2 = (bx + bw / 2.0).round() as i32;
@@ -414,15 +515,16 @@ impl YoloDetector {
             let fallback_color = Scalar::new(255., 255., 255., 0.);
             let color = *self.colors.get(class_id).unwrap_or(&fallback_color);
 
-            // рисуем бокс на output
             imgproc::rectangle(&mut output, rect, color, 2, imgproc::LINE_8, 0)?;
 
-            // формируем бинарную маску из прототипов
-            let mask_weights = pred.slice(s![84..116]);
-            let mask_mat =
-                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)?;
+            let mask_mat = Self::make_mask_mat(
+                mask_weights.view(),
+                &mask_protos,
+                ph,
+                original_size,
+                threshold,
+            )?;
 
-            // создаём маску bbox, чтобы ограничить область наложения
             let mut bbox_mask =
                 Mat::zeros(original_size.height, original_size.width, core::CV_8UC1)?.to_mat()?;
             imgproc::rectangle(
@@ -434,15 +536,12 @@ impl YoloDetector {
                 0,
             )?;
 
-            // пересечение маски объекта и bbox
             let mut mask_clipped = Mat::default();
             core::bitwise_and(&mask_mat, &bbox_mask, &mut mask_clipped, &Mat::default())?;
 
-            // накладываем цвет внутри пересечённой маски на overlay
             overlay.set_to(&color, &mask_clipped)?;
         }
 
-        // смешиваем overlay (маски внутри боксов) и output (оригинал + боксы)
         let mut blended = Mat::default();
         core::add_weighted(&overlay, 0.5, &output, 0.5, 0.0, &mut blended, -1)?;
 
@@ -453,14 +552,17 @@ impl YoloDetector {
         &self,
         detections: ndarray::Array2<f32>,
         threshold: f32,
+        nms_threshold: f32,
         original_size: core::Size,
     ) -> Vec<(String, core::Rect)> {
-        let mut result = Vec::new();
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut class_ids = Vec::new();
+
+        let scale_x = original_size.width as f32 / (self.input_size as f32);
+        let scale_y = original_size.height as f32 / (self.input_size as f32);
 
         for pred in detections.outer_iter() {
-            let scale_x = original_size.width as f32 / (self.input_size as f32);
-            let scale_y = original_size.height as f32 / (self.input_size as f32);
-
             let class_confidences: Vec<f32> = pred.iter().copied().skip(4).collect();
             let (max_class_id, max_confidence) = class_confidences
                 .iter()
@@ -475,19 +577,34 @@ impl YoloDetector {
                 let width = pred[2] * scale_x;
                 let height = pred[3] * scale_y;
 
-                let x1 = (x_center - width / 2.0) as i32;
-                let y1 = (y_center - height / 2.0) as i32;
-                let rect = core::Rect::new(x1, y1, width as i32, height as i32);
+                let x1 = x_center - width / 2.0;
+                let y1 = y_center - height / 2.0;
 
-                let class_name = self
-                    .classes
-                    .get(max_class_id)
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
-
-                // Добавляем вектор с классом и его позицией (прямоугольник)
-                result.push((class_name.to_string(), rect));
+                boxes.push((x1, y1, width, height));
+                scores.push(max_confidence);
+                class_ids.push(max_class_id);
             }
+        }
+
+        let keep_indices = Self::non_max_suppression(&boxes, &scores, nms_threshold);
+
+        let mut result = Vec::new();
+        for &i in &keep_indices {
+            let (x1, y1, w, h) = boxes[i];
+            let rect = core::Rect::new(
+                x1.round() as i32,
+                y1.round() as i32,
+                w.round() as i32,
+                h.round() as i32,
+            );
+
+            let class_name = self
+                .classes
+                .get(class_ids[i])
+                .map(String::as_str)
+                .unwrap_or("unknown");
+
+            result.push((class_name.to_string(), rect));
         }
 
         result
@@ -497,14 +614,18 @@ impl YoloDetector {
         &self,
         detections: ndarray::Array2<f32>,
         threshold: f32,
+        nms_threshold: f32,
         original_size: core::Size,
     ) -> Vec<(String, core::Rect, f32)> {
-        let mut result = Vec::new();
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut class_ids = Vec::new();
+        let mut angles = Vec::new();
+
+        let scale_x = original_size.width as f32 / self.input_size as f32;
+        let scale_y = original_size.height as f32 / self.input_size as f32;
 
         for pred in detections.outer_iter() {
-            let scale_x = original_size.width as f32 / self.input_size as f32;
-            let scale_y = original_size.height as f32 / self.input_size as f32;
-
             let class_confidences: Vec<f32> = pred.iter().copied().skip(4).take(15).collect();
             let (max_class_id, max_confidence) = class_confidences
                 .iter()
@@ -518,21 +639,37 @@ impl YoloDetector {
                 let y_center = pred[1] * scale_y;
                 let width = pred[2] * scale_x;
                 let height = pred[3] * scale_y;
-                let angle_rad = pred[19];
-                let angle_deg = angle_rad.to_degrees();
+                let angle_deg = pred[19].to_degrees();
 
-                let x1 = (x_center - width / 2.0).round() as i32;
-                let y1 = (y_center - height / 2.0).round() as i32;
-                let rect = core::Rect::new(x1, y1, width.round() as i32, height.round() as i32);
+                let x1 = x_center - width / 2.0;
+                let y1 = y_center - height / 2.0;
 
-                let class_name = self
-                    .classes
-                    .get(max_class_id)
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
-
-                result.push((class_name.to_string(), rect, angle_deg));
+                boxes.push((x1, y1, width, height));
+                scores.push(max_confidence);
+                class_ids.push(max_class_id);
+                angles.push(angle_deg);
             }
+        }
+
+        let keep_indices = Self::non_max_suppression(&boxes, &scores, nms_threshold);
+
+        let mut result = Vec::new();
+        for &i in &keep_indices {
+            let (x1, y1, w, h) = boxes[i];
+            let rect = core::Rect::new(
+                x1.round() as i32,
+                y1.round() as i32,
+                w.round() as i32,
+                h.round() as i32,
+            );
+
+            let class_name = self
+                .classes
+                .get(class_ids[i])
+                .map(String::as_str)
+                .unwrap_or("unknown");
+
+            result.push((class_name.to_string(), rect, angles[i]));
         }
 
         result
@@ -543,14 +680,19 @@ impl YoloDetector {
         detections: Array2<f32>,
         mask_protos: Array2<f32>,
         threshold: f32,
+        nms_threshold: f32,
         original_size: core::Size,
     ) -> opencv::Result<Vec<(String, core::Rect, f32, Mat)>> {
-        let mut results = Vec::new();
-        let ph = (mask_protos.shape()[1] as f32).sqrt() as usize;
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut class_ids = Vec::new();
+        let mut masks = Vec::new();
 
-        // Проходим по предсказаниям
+        let ph = (mask_protos.shape()[1] as f32).sqrt() as usize;
+        let scale_x = original_size.width as f32 / self.input_size as f32;
+        let scale_y = original_size.height as f32 / self.input_size as f32;
+
         for pred in detections.outer_iter() {
-            // Извлекаем класс и confidence
             let class_scores = pred.slice(s![4..84]);
             let (class_id, &conf) = class_scores
                 .iter()
@@ -562,39 +704,46 @@ impl YoloDetector {
                 continue;
             }
 
-            // Преобразуем bbox в оригинальные координаты
-            let scale_x = original_size.width as f32 / self.input_size as f32;
-            let scale_y = original_size.height as f32 / self.input_size as f32;
             let bx = pred[0] * scale_x;
             let by = pred[1] * scale_y;
             let bw = pred[2] * scale_x;
             let bh = pred[3] * scale_y;
-            let x1 = (bx - bw / 2.0).round() as i32;
-            let y1 = (by - bh / 2.0).round() as i32;
-            let x2 = (bx + bw / 2.0).round() as i32;
-            let y2 = (by + bh / 2.0).round() as i32;
+            let x1 = bx - bw / 2.0;
+            let y1 = by - bh / 2.0;
 
+            // bbox
+            boxes.push((x1, y1, bw, bh));
+            scores.push(conf);
+            class_ids.push(class_id);
+
+            // маска
+            let mask_weights = pred.slice(s![84..116]);
+            let mask =
+                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)?;
+            masks.push(mask);
+        }
+
+        // NMS
+        let keep = Self::non_max_suppression(&boxes, &scores, nms_threshold);
+
+        // финальные результаты
+        let mut results = Vec::new();
+        for &i in &keep {
+            let (x, y, w, h) = boxes[i];
             let rect = core::Rect::new(
-                x1.clamp(0, original_size.width - 1),
-                y1.clamp(0, original_size.height - 1),
-                (x2 - x1).clamp(1, original_size.width - x1),
-                (y2 - y1).clamp(1, original_size.height - y1),
+                x.round() as i32,
+                y.round() as i32,
+                w.round() as i32,
+                h.round() as i32,
             );
 
-            // Получаем имя класса
             let class_name = self
                 .classes
-                .get(class_id)
+                .get(class_ids[i])
                 .map(String::as_str)
                 .unwrap_or("unknown");
 
-            // Генерация бинарной маски
-            let mask_weights = pred.slice(s![84..116]);
-            let mask_mat =
-                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)?;
-
-            // Добавляем данные в результат
-            results.push((class_name.to_string(), rect, conf, mask_mat));
+            results.push((class_name.to_string(), rect, scores[i], masks[i].clone()));
         }
 
         Ok(results)

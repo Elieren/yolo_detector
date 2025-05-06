@@ -41,7 +41,7 @@ fn main() -> opencv::Result<()> {
 
     let (detections, original_size) = detector.detect(&mat.clone())?;
 
-    let result = detector.draw_detections(mat.clone(), detections, 0.5, original_size)?;
+    let result = detector.draw_detections(mat.clone(), detections, 0.5, 0.5, original_size)?;
 
     highgui::imshow("YOLOv8 Video", &result)?;
     highgui::wait_key(0)?;
@@ -61,7 +61,7 @@ fn main() -> opencv::Result<()> {
     let (detections, original_size) = detector.detect(&mat.clone())?;
 
     let detections_with_classes =
-        detector.get_detections_with_classes(detections, 0.5, original_size);
+        detector.get_detections_with_classes(detections, 0.5, 0.5, original_size);
 
     for (class_name, rect) in detections_with_classes {
         println!("Class: {}, Position: {:?}", class_name, rect);
@@ -128,7 +128,7 @@ fn main() -> opencv::Result<()> {
 
     let (detections, original_size) = detector.detect(&mat.clone())?;
 
-    let result = detector.draw_detections_obb(mat.clone(), detections, 0.5, original_size)?;
+    let result = detector.draw_detections_obb(mat.clone(), detections, 0.5, 0.5, original_size)?;
 
     highgui::imshow("YOLOv8 Video", &result)?;
     highgui::wait_key(0)?;
@@ -149,7 +149,7 @@ fn main() -> opencv::Result<()> {
     let (detections, original_size) = detector.detect(&mat.clone())?;
 
     let detections_with_classes =
-        detector.get_detections_with_classes_obb(detections, 0.5, original_size);
+        detector.get_detections_with_classes_obb(detections, 0.5, 0.5, original_size);
 
     for (class_name, rect, rotation_angle) in detections_with_classes {
         println!(
@@ -206,7 +206,8 @@ fn main() -> opencv::Result<()> {
 
     let (detections, mask, original_size) = detector.detect_mask(&mat.clone())?;
 
-    let result = detector.draw_detections_masked(mat.clone(), detections, mask, original_size, 0.5)?;
+    let result =
+        detector.draw_detections_masked(mat.clone(), detections, mask, 0.5, 0.5, original_size)?;
 
     highgui::imshow("YOLOv8 Video", &result)?;
     highgui::wait_key(0)?;
@@ -227,7 +228,7 @@ fn main() -> opencv::Result<()> {
     let (detections, mask, original_size) = detector.detect_mask(&mat.clone())?;
 
     let detections =
-        detector.get_detections_with_classes_masks(detections, mask, 0.5, original_size)?;
+        detector.get_detections_with_classes_masks(detections, mask, 0.5, 0.5, original_size)?;
 
     // Обработка результатов
     for (class_name, rect, conf, mask) in detections {
