@@ -1,11 +1,8 @@
-use ndarray::{s, Array2, Array4, ArrayD, ArrayView, ArrayView1, Axis, CowArray, IxDyn};
+use ndarray::{s, Array2, Array4, ArrayD, ArrayView1, CowArray, IxDyn};
 
 use opencv::{
     core,
-    core::{
-        add_weighted, no_array, Mat, Point, Point2f, Rect, Scalar, Size, Size2f, Vector, CV_8UC1,
-        CV_8UC3,
-    },
+    core::{Mat, Point, Point2f, Rect, Scalar, Size, Size2f, Vector},
     dnn::{Backend, DetectionModel},
     imgproc,
     prelude::*,
@@ -543,11 +540,10 @@ impl YoloDetector {
 
     pub fn get_detections_with_classes_masks(
         &self,
-        img: Mat,
         detections: Array2<f32>,
         mask_protos: Array2<f32>,
-        original_size: core::Size,
         threshold: f32,
+        original_size: core::Size,
     ) -> opencv::Result<Vec<(String, core::Rect, f32, Mat)>> {
         let mut results = Vec::new();
         let ph = (mask_protos.shape()[1] as f32).sqrt() as usize;

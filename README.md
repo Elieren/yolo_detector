@@ -227,7 +227,7 @@ fn main() -> opencv::Result<()> {
     let (detections, mask, original_size) = detector.detect_mask(&mat.clone())?;
 
     let detections =
-        detector.get_detections_with_classes_masks(mat.clone(), detections, mask, original_size, 0.5)?;
+        detector.get_detections_with_classes_masks(detections, mask, 0.5, original_size)?;
 
     // Обработка результатов
     for (class_name, rect, conf, mask) in detections {
