@@ -8,7 +8,7 @@ use opencv::{
     prelude::*,
 };
 use ordered_float::OrderedFloat;
-use ort::{Environment, Session, SessionBuilder, Value};
+use ort::{Environment, ExecutionProvider, Session, SessionBuilder, Value};
 use rand::distr::{Distribution, Uniform};
 use rand::rng;
 use std::fs::File;
@@ -34,7 +34,13 @@ impl YoloDetector {
             anyhow::bail!("Input size must be a multiple of 32");
         }
         let environment = Arc::new(Environment::builder().with_name("YOLO").build()?);
-        let session = SessionBuilder::new(&environment)?.with_model_from_file(model_path)?;
+        let session = SessionBuilder::new(&environment)?
+            .with_optimization_level(ort::GraphOptimizationLevel::Level3)?
+            .with_execution_providers([
+                ExecutionProvider::CUDA(Default::default()),
+                ExecutionProvider::CPU(Default::default()),
+            ])?
+            .with_model_from_file(model_path)?;
 
         let classes = Self::load_classes(class_file)?;
         let colors = classes

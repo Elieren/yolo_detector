@@ -1,6 +1,6 @@
 [package]
 name = "yolo_detector"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["Elieren https://github.com/Elieren"]
 edition = "2021"
 description = "YOLO object detection wrapper for OpenCV and ONNX in Rust"
@@ -14,7 +14,7 @@ keywords = ["yolo", "onnx", "opencv", "object-detection"]
 [dependencies]
 opencv = "0.94.4"
 rand = "0.9.1"
-ort = "1.16.3"
+ort = { version = "1.16.3", features = ["cuda"] }
 ndarray = "=0.15.6"
 anyhow = "1.0.98"
 ordered-float = "5.0.0"
