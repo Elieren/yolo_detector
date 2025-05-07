@@ -199,6 +199,99 @@ fn main() -> opencv::Result<()> {
 }
 ```
 
+### Pose
+pose.names
+```
+Nose
+Left Eye
+Right Eye
+Left Ear
+Right Ear
+Left Shoulder
+Right Shoulder
+Left Elbow
+Right Elbow
+Left Wrist
+Right Wrist
+Left Hip
+Right Hip
+Left Knee
+Right Knee
+Left Ankle
+Right Ankle
+```
+
+```rust
+use opencv::{highgui, imgcodecs};
+use yolo_detector::YoloDetector;
+
+fn main() -> opencv::Result<()> {
+    let detector = YoloDetector::new("yolov8m-pose.onnx", "pose.names", 640).unwrap();
+
+    let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let (detections, original_size) = detector.detect_pose(&mat.clone())?;
+
+    let result = detector.draw_detections_pose(mat.clone(), detections, 0.5, 0.5, original_size)?;
+
+    highgui::imshow("YOLOv8 Video", &result)?;
+    highgui::wait_key(0)?;
+
+    Ok(())
+}
+```
+```rust
+use yolo_detector::YoloDetector;
+use opencv::imgcodecs;
+
+fn main() -> opencv::Result<()> {
+    let detector = YoloDetector::new("yolov8m-pose.onnx", "pose.names", 640).unwrap();
+
+    let mat = imgcodecs::imread("image.jpg", imgcodecs::IMREAD_COLOR)?;
+
+    let (detections, original_size) = detector.detect_pose(&mat.clone())?;
+
+    let result = detector.get_detections_with_classes_pose(detections, 0.5, 0.5, original_size);
+
+    for (i, keypoints) in result.iter().enumerate() {
+        println!("Person {}:", i + 1);
+        for (name, point) in keypoints {
+            println!("  {}: ({}, {})", name, point.x, point.y);
+        }
+    }
+
+    Ok(())
+
+//returns values
+// Person 1:
+//   Nose: (545, 98)
+//   Right Shoulder: (524, 115)
+//   Left Wrist: (556, 153)
+//   Left Hip: (549, 155)
+//   Left Shoulder: (552, 115)
+//   Left Elbow: (555, 135)
+//   Left Eye: (547, 96)
+//   Right Eye: (541, 96)
+//   Right Wrist: (520, 154)
+//   Right Knee: (530, 183)
+//   Right Ear: (532, 98)
+//   Right Hip: (530, 155)
+//   Right Elbow: (516, 136)
+// Person 2:
+//   Left Hip: (829, 160)
+//   Left Knee: (834, 185)
+//   Left Shoulder: (820, 122)
+//   Right Ear: (851, 102)
+//   Left Elbow: (817, 142)
+//   Left Ankle: (837, 210)
+//   Right Ankle: (847, 210)
+//   Left Ear: (824, 103)
+//   Right Knee: (849, 185)
+//   Right Shoulder: (861, 121)
+//   Right Hip: (856, 160)
+}
+```
+
 ### Segmentation
 ```rust
 use opencv::{highgui, imgcodecs};
@@ -233,7 +326,7 @@ fn main() -> opencv::Result<()> {
     let (detections, mask, original_size) = detector.detect_mask(&mat.clone())?;
 
     let detections =
-        detector.get_detections_with_classes_masks(detections, mask, 0.5, 0.5, original_size)?;
+        detector.get_detections_with_classes_masks(detections, mask, 0.5, 0.5, original_size);
 
     // Обработка результатов
     for (class_name, rect, conf, mask) in detections {
@@ -256,7 +349,7 @@ fn main() -> opencv::Result<()> {
 - [x] Weights
 - [x] OBB
 - [x] Classification
-- [ ] Pose
+- [x] Pose
 - [x] Segmentation
 
 __Note: CUDA‑GPU support was added starting from version 0.6.1__

@@ -11,6 +11,7 @@ use ordered_float::OrderedFloat;
 use ort::{Environment, ExecutionProvider, Session, SessionBuilder, Value};
 use rand::distr::{Distribution, Uniform};
 use rand::rng;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
@@ -263,6 +264,51 @@ impl YoloDetector {
             .map_err(|e| opencv::Error::new(0, format!("Shape error: {}", e)))?;
 
         Ok((detections, mask, original_size))
+    }
+
+    pub fn detect_pose(&self, mat: &Mat) -> Result<(Array2<f32>, core::Size), opencv::Error> {
+        let original_size = mat.size()?;
+        let size = core::Size::new(self.input_size, self.input_size);
+        let mut resized = Mat::default();
+        imgproc::resize(&mat, &mut resized, size, 0.0, 0.0, imgproc::INTER_LINEAR)?;
+
+        // Извлекаем и нормализуем данные
+        let data = resized.data_bytes().unwrap();
+        let input: Vec<f32> = data
+            .chunks(3)
+            .flat_map(|bgr| [bgr[2] as f32, bgr[1] as f32, bgr[0] as f32])
+            .map(|v| v / 255.0)
+            .collect();
+
+        // Создаем Array4 [1, 3, N, N]
+        let input_size = self.input_size as usize;
+
+        let input_tensor = Array4::from_shape_fn((1, 3, input_size, input_size), |(_, c, y, x)| {
+            input[(y * input_size + x) * 3 + c]
+        });
+
+        // Преобразуем в динамический тензор и оборачиваем
+        let array_dyn: ArrayD<f32> = input_tensor.into_dyn();
+        let cow_input = CowArray::from(array_dyn);
+        let input_value = Value::from_array(self.session.allocator(), &cow_input).unwrap();
+
+        // Инференс
+        let outputs = self.session.run(vec![input_value]).unwrap();
+
+        // Получаем OrtOwnedTensor<f32, IxDyn>
+        let output_tensor: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
+            outputs[0].try_extract().unwrap();
+
+        let temp_output = output_tensor.view(); // [116,8400]
+        let output = temp_output
+            .clone()
+            .index_axis_move(ndarray::Axis(0), 0)
+            .to_owned();
+        let detections: Array2<f32> = output
+            .into_dimensionality()
+            .map_err(|e| opencv::Error::new(0, format!("Shape error: {}", e)))?;
+
+        Ok((detections, original_size))
     }
 
     pub fn draw_detections(
@@ -554,6 +600,122 @@ impl YoloDetector {
         Ok(blended)
     }
 
+    pub fn draw_detections_pose(
+        &self,
+        mut img: Mat,
+        detections: ndarray::Array2<f32>,
+        threshold: f32,
+        nms_threshold: f32,
+        original_size: core::Size,
+    ) -> opencv::Result<Mat> {
+        let scale_x = original_size.width as f32 / self.input_size as f32;
+        let scale_y = original_size.height as f32 / self.input_size as f32;
+
+        let num_keypoints = (detections.shape()[0] - 5) / 3;
+        let num_dets = detections.shape()[1];
+
+        // Скелетные связи (COCO формат)
+        const SKELETON: &[(usize, usize)] = &[
+            (0, 1),
+            (0, 2),
+            (1, 3),
+            (2, 4),
+            (1, 5),
+            (2, 6),
+            (5, 6),
+            (5, 7),
+            (7, 9),
+            (6, 8),
+            (8, 10),
+            (5, 11),
+            (6, 12),
+            (11, 12),
+            (11, 13),
+            (13, 15),
+            (12, 14),
+            (14, 16),
+        ];
+
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut valid_indices = Vec::new();
+
+        for i in 0..num_dets {
+            let object_conf = detections[[4, i]];
+            if object_conf < threshold {
+                continue;
+            }
+
+            let mut has_valid_kp = false;
+            for kp in 0..num_keypoints {
+                let conf = detections[[5 + kp * 3 + 2, i]];
+                if conf > 0.3 {
+                    has_valid_kp = true;
+                    break;
+                }
+            }
+
+            if !has_valid_kp {
+                continue;
+            }
+
+            let x_center = detections[[0, i]];
+            let y_center = detections[[1, i]];
+            let width = detections[[2, i]];
+            let height = detections[[3, i]];
+
+            boxes.push((x_center, y_center, width, height));
+            scores.push(object_conf);
+            valid_indices.push(i);
+        }
+
+        let keep = Self::non_max_suppression(&boxes, &scores, nms_threshold);
+
+        for &keep_i in &keep {
+            let i = valid_indices[keep_i];
+
+            // Сохраняем keypoints с высоким доверием
+            let mut keypoints = std::collections::HashMap::new();
+
+            for kp in 0..num_keypoints {
+                let x = detections[[5 + kp * 3 + 0, i]] * scale_x;
+                let y = detections[[5 + kp * 3 + 1, i]] * scale_y;
+                let conf = detections[[5 + kp * 3 + 2, i]];
+
+                if conf > 0.3 {
+                    let point = core::Point::new(x as i32, y as i32);
+                    keypoints.insert(kp, point);
+                    imgproc::circle(
+                        &mut img,
+                        point,
+                        4,
+                        Scalar::new(0.0, 255.0, 0.0, 0.0), // зелёные точки
+                        -1,
+                        imgproc::LINE_8,
+                        0,
+                    )?;
+                }
+            }
+
+            // Рисуем линии между парными точками
+            for &(start, end) in SKELETON {
+                if let (Some(p1), Some(p2)) = (keypoints.get(&start), keypoints.get(&end)) {
+                    imgproc::line(
+                        &mut img,
+                        *p1,
+                        *p2,
+                        Scalar::new(255.0, 0.0, 0.0, 0.0), // красные линии
+                        2,
+                        imgproc::LINE_AA,
+                        0,
+                    )?;
+                }
+            }
+        }
+
+        Ok(img)
+    }
+
     pub fn get_detections_with_classes(
         &self,
         detections: ndarray::Array2<f32>,
@@ -688,7 +850,7 @@ impl YoloDetector {
         threshold: f32,
         nms_threshold: f32,
         original_size: core::Size,
-    ) -> opencv::Result<Vec<(String, core::Rect, f32, Mat)>> {
+    ) -> Vec<(String, core::Rect, f32, Mat)> {
         let mut boxes = Vec::new();
         let mut scores = Vec::new();
         let mut class_ids = Vec::new();
@@ -725,7 +887,8 @@ impl YoloDetector {
             // маска
             let mask_weights = pred.slice(s![84..116]);
             let mask =
-                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)?;
+                Self::make_mask_mat(mask_weights, &mask_protos, ph, original_size, threshold)
+                    .expect("ERROR");
             masks.push(mask);
         }
 
@@ -752,7 +915,86 @@ impl YoloDetector {
             results.push((class_name.to_string(), rect, scores[i], masks[i].clone()));
         }
 
-        Ok(results)
+        results
+    }
+
+    pub fn get_detections_with_classes_pose(
+        &self,
+        detections: ndarray::Array2<f32>,
+        threshold: f32,
+        nms_threshold: f32,
+        original_size: Size,
+    ) -> Vec<HashMap<String, Point>> {
+        let scale_x = original_size.width as f32 / self.input_size as f32;
+        let scale_y = original_size.height as f32 / self.input_size as f32;
+
+        let num_keypoints = (detections.shape()[0] - 5) / 3;
+        let num_dets = detections.shape()[1];
+
+        // Убедимся, что количество классов соответствует числу ключевых точек
+        let keypoint_names = &self.classes;
+
+        if num_keypoints > keypoint_names.len() {
+            // Если классов меньше, чем ключевых точек, выдаём ошибку
+            panic!("Number of keypoints exceeds number of class names in `classes`.");
+        }
+
+        let mut boxes = Vec::new();
+        let mut scores = Vec::new();
+        let mut valid_indices = Vec::new();
+
+        for i in 0..num_dets {
+            let object_conf = detections[[4, i]];
+            if object_conf < threshold {
+                continue;
+            }
+
+            let mut has_valid_kp = false;
+            for kp in 0..num_keypoints {
+                let conf = detections[[5 + kp * 3 + 2, i]];
+                if conf > 0.3 {
+                    has_valid_kp = true;
+                    break;
+                }
+            }
+
+            if !has_valid_kp {
+                continue;
+            }
+
+            let x_center = detections[[0, i]];
+            let y_center = detections[[1, i]];
+            let width = detections[[2, i]];
+            let height = detections[[3, i]];
+
+            boxes.push((x_center, y_center, width, height));
+            scores.push(object_conf);
+            valid_indices.push(i);
+        }
+
+        let keep = Self::non_max_suppression(&boxes, &scores, nms_threshold);
+
+        let mut results = Vec::new();
+
+        for &keep_i in &keep {
+            let i = valid_indices[keep_i];
+            let mut keypoints_map = HashMap::new();
+
+            for kp in 0..num_keypoints {
+                let x = detections[[5 + kp * 3 + 0, i]] * scale_x;
+                let y = detections[[5 + kp * 3 + 1, i]] * scale_y;
+                let conf = detections[[5 + kp * 3 + 2, i]];
+
+                if conf > 0.3 {
+                    let point = Point::new(x as i32, y as i32);
+                    keypoints_map.insert(keypoint_names[kp].to_string(), point);
+                }
+            }
+
+            results.push(keypoints_map);
+        }
+
+        results
     }
 
     pub fn classify(&self, mat: &Mat, threshold: f32) -> Result<Vec<(String, f32)>, opencv::Error> {

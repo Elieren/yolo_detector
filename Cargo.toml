@@ -1,6 +1,6 @@
 [package]
 name = "yolo_detector"
-version = "0.6.1"
+version = "1.0.0"
 authors = ["Elieren https://github.com/Elieren"]
 edition = "2021"
 description = "YOLO object detection wrapper for OpenCV and ONNX in Rust"
