@@ -158,13 +158,14 @@ impl YoloDetector {
         keep
     }
 
-    pub fn detect(&self, mat: &Mat) -> Result<(Array2<f32>, core::Size), opencv::Error> {
-        let original_size = mat.size()?;
+    fn run_inference(
+        &self,
+        mat: &Mat,
+    ) -> Result<Vec<ort::tensor::OrtOwnedTensor<f32, IxDyn>>, opencv::Error> {
         let size = core::Size::new(self.input_size, self.input_size);
         let mut resized = Mat::default();
         imgproc::resize(&mat, &mut resized, size, 0.0, 0.0, imgproc::INTER_LINEAR)?;
 
-        // Извлекаем и нормализуем данные
         let data = resized.data_bytes().unwrap();
         let input: Vec<f32> = data
             .chunks(3)
@@ -172,31 +173,38 @@ impl YoloDetector {
             .map(|v| v / 255.0)
             .collect();
 
-        // Создаем Array4 [1, 3, N, N]
         let input_size = self.input_size as usize;
-
         let input_tensor = Array4::from_shape_fn((1, 3, input_size, input_size), |(_, c, y, x)| {
             input[(y * input_size + x) * 3 + c]
         });
 
-        // Преобразуем в динамический тензор и оборачиваем
         let array_dyn: ArrayD<f32> = input_tensor.into_dyn();
         let cow_input = CowArray::from(array_dyn);
         let input_value = Value::from_array(self.session.allocator(), &cow_input).unwrap();
 
-        // Инференс
-        let outputs = self.session.run(vec![input_value]).unwrap();
+        let outputs: Vec<Value> = self.session.run(vec![input_value]).unwrap();
 
-        // Получаем OrtOwnedTensor<f32, IxDyn>
-        let output_tensor: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
-            outputs[0].try_extract().unwrap();
+        // Здесь сразу извлекаем OrtOwnedTensor, чтобы lifetime не зависел от &self
+        let tensors: Vec<ort::tensor::OrtOwnedTensor<f32, IxDyn>> = outputs
+            .into_iter()
+            .map(|v| v.try_extract().unwrap())
+            .collect();
 
-        let output_view = output_tensor.view();
+        Ok(tensors)
+    }
 
-        // Удалим batch-ось [1, N, 8400] → [N, 8400]
-        let output_array = output_view.clone().index_axis_move(ndarray::Axis(0), 0);
 
-        // Теперь транспонируем: [N, 8400] → [8400, N]
+    pub fn detect(&self, mat: &Mat) -> Result<(Array2<f32>, core::Size), opencv::Error> {
+        let original_size = mat.size()?;
+        let outputs = self.run_inference(mat)?;
+
+        // У нас уже есть OrtOwnedTensor, без try_extract
+        let output_view = outputs[0].view();
+
+        // [1, N, 8400] → [N, 8400]
+        let output_array = output_view.index_axis(ndarray::Axis(0), 0);
+
+        // Транспонируем: [N, 8400] → [8400, N]
         let transposed_dyn = output_array.t().to_owned();
         let transposed: Array2<f32> = transposed_dyn
             .into_dimensionality()
@@ -210,48 +218,15 @@ impl YoloDetector {
         mat: &Mat,
     ) -> Result<(Array2<f32>, Array2<f32>, core::Size), opencv::Error> {
         let original_size = mat.size()?;
-        let size = core::Size::new(self.input_size, self.input_size);
-        let mut resized = Mat::default();
-        imgproc::resize(&mat, &mut resized, size, 0.0, 0.0, imgproc::INTER_LINEAR)?;
+        let outputs = self.run_inference(mat)?;
 
-        // Извлекаем и нормализуем данные
-        let data = resized.data_bytes().unwrap();
-        let input: Vec<f32> = data
-            .chunks(3)
-            .flat_map(|bgr| [bgr[2] as f32, bgr[1] as f32, bgr[0] as f32])
-            .map(|v| v / 255.0)
-            .collect();
+        // Здесь тоже — уже OrtOwnedTensor
+        let temp_output0 = outputs[0].view(); // [116,8400]
+        let output0 = temp_output0.index_axis(ndarray::Axis(0), 0);
+        let dets = output0.t().to_owned();
 
-        // Создаем Array4 [1, 3, N, N]
-        let input_size = self.input_size as usize;
-
-        let input_tensor = Array4::from_shape_fn((1, 3, input_size, input_size), |(_, c, y, x)| {
-            input[(y * input_size + x) * 3 + c]
-        });
-
-        // Преобразуем в динамический тензор и оборачиваем
-        let array_dyn: ArrayD<f32> = input_tensor.into_dyn();
-        let cow_input = CowArray::from(array_dyn);
-        let input_value = Value::from_array(self.session.allocator(), &cow_input).unwrap();
-
-        // Инференс
-        let outputs = self.session.run(vec![input_value]).unwrap();
-
-        // Получаем OrtOwnedTensor<f32, IxDyn>
-        let output_tensor1: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
-            outputs[0].try_extract().unwrap();
-
-        let output_tensor2: ort::tensor::OrtOwnedTensor<f32, IxDyn> =
-            outputs[1].try_extract().unwrap();
-
-        let temp_output0 = output_tensor1.view(); // [116,8400]
-        let output0 = temp_output0.clone().index_axis_move(ndarray::Axis(0), 0);
-        let dets = output0.t().to_owned(); // [8400,116]
-        let temp_protos = output_tensor2.view(); // [32,160,160]
-        let protos = temp_protos
-            .clone()
-            .index_axis(ndarray::Axis(0), 0)
-            .to_owned();
+        let temp_protos = outputs[1].view(); // [32,160,160]
+        let protos = temp_protos.index_axis(ndarray::Axis(0), 0).to_owned();
         let (num_proto, ph, pw) = (protos.shape()[0], protos.shape()[1], protos.shape()[2]);
         let proto_flat = protos.into_shape((num_proto, ph * pw)).unwrap();
 
